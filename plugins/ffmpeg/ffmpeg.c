@@ -60,6 +60,7 @@ static DB_functions_t *deadbeef;
 static char * exts[EXT_MAX+1] = {NULL};
 
 static int enable_dsd = 0;
+static int dsd_output_bps = 0;
 
 static const uint8_t bit_reverse_table[256] =
 {
@@ -117,32 +118,49 @@ bit_reverse_buffer(uint8_t *start, int count)
 		*p = bit_reverse(*p);
 }
 
-/**
- * DSF data is build up of alternating 4096 blocks of DSD samples for left and
- * right. Convert the buffer holding 1 block of 4096 DSD left samples and 1
- * block of 4096 DSD right samples to 8k of samples in normal PCM left/right
- * order.
- */
+
 #define DSF_BLOCK_SIZE 4096
 static void
-dsf_to_pcm_order(uint8_t *dest, size_t nrbytes)
+dsf_to_pcm_order(uint8_t *dest, size_t nrbytes, int channels_count)
 {
-    uint8_t temp[DSF_BLOCK_SIZE * 2] = { 0 };
+    uint8_t* temp;
+    
 
-    if (nrbytes != DSF_BLOCK_SIZE * 2) {
-        fprintf(stderr, "DBG:FFMPEG:Packet size is not %d,which equals to %d\n", DSF_BLOCK_SIZE * 2, nrbytes);
+    if (nrbytes != DSF_BLOCK_SIZE * channels_count) {
+        fprintf(stderr, "DBG:FFMPEG:DSD packet size is not %d,which equals to %d\n", DSF_BLOCK_SIZE * channels_count, nrbytes);
         return;
     }
+    temp = (uint8_t*)malloc(nrbytes);
+    
 
-    unsigned int* left = (unsigned int*)dest;
-    unsigned int* right = (unsigned int*)(dest + DSF_BLOCK_SIZE);
-    unsigned int* to = (unsigned int*)temp;
-    for (unsigned int i = 0; i < DSF_BLOCK_SIZE * 2 / sizeof(unsigned int); i += 2) {
-        to[i] = left[i / 2];
-        to[i + 1] = right[i / 2];
+    uint8_t** channels = (uint8_t**)malloc(sizeof(uint8_t**) * channels_count);
+    for (int i = 0; i < channels_count; i++) {
+        channels[i] = (uint8_t*)(dest + DSF_BLOCK_SIZE * i);
     }
 
+    int dsd_unit_size;
+    if (dsd_output_bps == 32) {
+        dsd_unit_size = 4;
+    } else if (dsd_output_bps == 16) {
+        dsd_unit_size = 2;
+    } else {
+        dsd_unit_size = 1;
+    }
+
+    uint8_t* to = temp;
+    for (int i = 0; i < DSF_BLOCK_SIZE / dsd_unit_size; i++) {
+        for (int c = 0; c < channels_count; c++) {
+            memcpy(to, channels[c], dsd_unit_size);
+            to += dsd_unit_size;
+            channels[c] += dsd_unit_size;
+        }
+    }
+    
+    free(channels);
+
 	memcpy(dest, temp, nrbytes);
+
+    free(temp);
 }
 
 #define DSD_SAMPLERATE_64 2882400
@@ -316,7 +334,7 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
     if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
         _info->fmt.is_float = 0;
         _info->fmt.is_dsd = 1;
-        _info->fmt.bps = 32;
+        _info->fmt.bps = dsd_output_bps;
         _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
         fprintf(stderr, "DBG:FFMPEG Plugin:Set dsd enabled\n");
     }
@@ -396,7 +414,7 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
    
     if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
         _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
-        _info->fmt.bps = 32;
+        _info->fmt.bps = dsd_output_bps;
         _info->fmt.is_dsd = 1;
         _info->fmt.is_float = 0;
     } else {
@@ -467,7 +485,7 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
                     }
                     memcpy(info->buffer, info->pkt.data, out_size);
                     bit_reverse_buffer(info->buffer, out_size);
-                    dsf_to_pcm_order(info->buffer, out_size);
+                    dsf_to_pcm_order(info->buffer, out_size, info->codec_context->channels);
                 } else {
                     if (ensure_buffer (info, info->frame->nb_samples * (_info->fmt.bps >> 3))) {
                         return -1;
@@ -966,6 +984,21 @@ ffmpeg_init_exts (void) {
     exts[n] = NULL;
 
     enable_dsd = deadbeef->conf_get_int ("ffmpeg.enable_dsd", 0);
+    switch(deadbeef->conf_get_int ("alsa.dsdformat", 0)) {
+        case 0:
+        case 1:
+            dsd_output_bps = 32;
+            break;
+        case 2:
+        case 3:
+            dsd_output_bps = 16;
+            break;
+        case 4:
+            dsd_output_bps = 8;
+            break;
+    }
+
+    fprintf(stderr, "selection=%d, dsd_output_bps=%d\n", deadbeef->conf_get_int ("alsa.dsdformat", 0), dsd_output_bps);
 
     deadbeef->conf_unlock ();
 }
