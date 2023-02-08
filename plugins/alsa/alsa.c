@@ -118,8 +118,6 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     snd_pcm_hw_params_t *hw_params = NULL;
     int err = 0;
 
-    fprintf(stderr, "DBG:ALSA:input bps=%d, is_float=%d, is_dsd=%d\n", fmt->bps, fmt->is_float, fmt->is_dsd);
-
     memcpy (&plugin.fmt, fmt, sizeof (ddb_waveformat_t));
     if (!plugin.fmt.channels) {
         // generic format
@@ -130,8 +128,6 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
         plugin.fmt.samplerate = 44100;
         plugin.fmt.channelmask = 3;
     }
-
-    fprintf(stderr, "DBG:ALSA:bps=%d, samplerate=%d, is_float=%d, is_dsd=%d\n", plugin.fmt.bps, plugin.fmt.samplerate, plugin.fmt.is_float, plugin.fmt.is_dsd);
 
     snd_pcm_nonblock(audio, 0);
     snd_pcm_drain (audio);
@@ -157,7 +153,6 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
 
     snd_pcm_format_t sample_fmt;
     if (plugin.fmt.is_dsd == 1) {
-        fprintf(stderr, "DBG:ALSA:DSD stream received!\n");
         int selected_dsd_index = deadbeef->conf_get_int ("alsa.dsdformat", 0);
         if (selected_dsd_index < 0 || selected_dsd_index > sizeof(supported_dsd_format)) {
             fprintf (stderr, "Invalid DSD Selection\n");
@@ -407,8 +402,6 @@ palsa_open (void) {
         memcpy (&plugin.fmt, &requested_fmt, sizeof (ddb_waveformat_t));
     }
 
-    fprintf(stderr, "DBG:ALSA:request bps=%d, is_float=%d, is_dsd=%d\n", requested_fmt.bps, requested_fmt.is_float, requested_fmt.is_dsd);
-
     if (palsa_set_hw_params (&plugin.fmt) < 0) {
         goto open_error;
     }
@@ -546,7 +539,6 @@ palsa_setformat (ddb_waveformat_t *fmt) {
     LOCK;
     _setformat_requested = 1;
     memcpy (&requested_fmt, fmt, sizeof (ddb_waveformat_t));
-    fprintf(stderr, "DBG:ALSA:set bps=%d, is_float=%d, is_dsd=%d\n", fmt->bps, fmt->is_float, fmt->is_dsd);
     UNLOCK;
     return 0;
 }
@@ -900,7 +892,7 @@ static const char settings_dlg[] =
     "property \"Use ALSA resampling\" checkbox alsa.resample 1;\n"
     "property \"Preferred buffer size\" entry alsa.buffer " DEFAULT_BUFFER_SIZE_STR ";\n"
     "property \"Preferred period size\" entry alsa.period " DEFAULT_PERIOD_SIZE_STR ";\n"
-    "property \"DSD output format:\" select[5] alsa.dsdformat 0 \"U32_BE\" \"U32_LE\" \"U16_BE\" \"U16_LE\" \"U8\";\n"
+    "property \"DSD output format:\" select[5] alsa.dsdformat 0 \"U32_BE\" \"U32_LE\" \"U16_BE\" \"U16_LE\";\n"
 ;
 
 // define plugin interface

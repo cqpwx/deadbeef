@@ -61,6 +61,9 @@ static char * exts[EXT_MAX+1] = {NULL};
 
 static int enable_dsd = 0;
 static int dsd_output_bps = 0;
+#define DSD_OUTPUT_ENDIAN_LITTLE 0
+#define DSD_OUTPUT_ENDIAN_BIG 1
+static int dsd_output_endian = 0;
 
 static const uint8_t bit_reverse_table[256] =
 {
@@ -92,30 +95,31 @@ typedef struct {
     int64_t currentsample;
 } ffmpeg_info_t;
 
+#define DSD_TYPE_NONE 0
+#define DSD_TYPE_LSBF 1
+#define DSD_TYPE_MSBF 2
 int is_codec_dsd(enum AVCodecID codec_id) {
     switch(codec_id) {
     case AV_CODEC_ID_DSD_LSBF:
-    case AV_CODEC_ID_DSD_MSBF:
     case AV_CODEC_ID_DSD_LSBF_PLANAR:
+        return DSD_TYPE_LSBF;
+        break;
+    case AV_CODEC_ID_DSD_MSBF:
     case AV_CODEC_ID_DSD_MSBF_PLANAR:
-        return 1;
+        return DSD_TYPE_MSBF;
+        break;
     default:
-        return 0;
+        return DSD_TYPE_NONE;
     }
-}
-
-static uint8_t
-bit_reverse(uint8_t x)
-{
-	return bit_reverse_table[x];
 }
 
 static void
 bit_reverse_buffer(uint8_t *start, int count)
 {
-    char* end = start + count;
-	for (char* p = start; p < end; ++p)
-		*p = bit_reverse(*p);
+    uint8_t* end = start + count;
+	for (uint8_t* p = start; p < end; ++p) {
+		*p = bit_reverse_table[*p];
+    }
 }
 
 
@@ -127,7 +131,7 @@ dsf_to_pcm_order(uint8_t *dest, size_t nrbytes, int channels_count)
     
 
     if (nrbytes != DSF_BLOCK_SIZE * channels_count) {
-        fprintf(stderr, "DBG:FFMPEG:DSD packet size is not %d,which equals to %d\n", DSF_BLOCK_SIZE * channels_count, nrbytes);
+        fprintf(stderr, "DBG:FFMPEG:DSD packet size should be %d,which equals to %zu\n", DSF_BLOCK_SIZE * channels_count, nrbytes);
         return;
     }
     temp = (uint8_t*)malloc(nrbytes);
@@ -336,13 +340,7 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
         _info->fmt.is_dsd = 1;
         _info->fmt.bps = dsd_output_bps;
         _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
-        fprintf(stderr, "DBG:FFMPEG Plugin:Set dsd enabled\n");
     }
-
-    fprintf(stderr, "DBG:FFMPEG Plugin:codec_id=%d, sample_fmt=%d, bit_rate=%d\n", 
-            info->codec_context->codec_id,
-            info->codec_context->sample_fmt,
-            info->codec_context->bit_rate);
 
     // FIXME: channel layout from ffmpeg
     // int64_t layout = info->ctx->channel_layout;
@@ -363,8 +361,6 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
         info->startsample = 0;
         info->endsample = totalsamples - 1;
     }
-
-    fprintf(stderr, "DBG:FFMPEG Plugin:bps=%d, fmt.is_float=%d fmt.is_dsd=%d\n", _info->fmt.bps, _info->fmt.is_float, _info->fmt.is_dsd);
 
     return 0;
 }
@@ -484,8 +480,11 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
                         return -1;
                     }
                     memcpy(info->buffer, info->pkt.data, out_size);
-                    bit_reverse_buffer(info->buffer, out_size);
-                    dsf_to_pcm_order(info->buffer, out_size, info->codec_context->channels);
+                    if ((is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_LSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_BIG) ||
+                        (is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_MSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_LITTLE)) {
+                        bit_reverse_buffer((uint8_t*)info->buffer, out_size);
+                    }
+                    dsf_to_pcm_order((uint8_t*)info->buffer, out_size, info->codec_context->channels);
                 } else {
                     if (ensure_buffer (info, info->frame->nb_samples * (_info->fmt.bps >> 3))) {
                         return -1;
@@ -986,19 +985,26 @@ ffmpeg_init_exts (void) {
     enable_dsd = deadbeef->conf_get_int ("ffmpeg.enable_dsd", 0);
     switch(deadbeef->conf_get_int ("alsa.dsdformat", 0)) {
         case 0:
+            dsd_output_bps = 32;
+            dsd_output_endian = DSD_OUTPUT_ENDIAN_BIG;
+            break;
         case 1:
             dsd_output_bps = 32;
+            dsd_output_endian = DSD_OUTPUT_ENDIAN_LITTLE;
             break;
         case 2:
+            dsd_output_bps = 16;
+            dsd_output_endian = DSD_OUTPUT_ENDIAN_BIG;
+            break;
         case 3:
             dsd_output_bps = 16;
+            dsd_output_endian = DSD_OUTPUT_ENDIAN_LITTLE;
             break;
-        case 4:
-            dsd_output_bps = 8;
-            break;
+        default:
+            dsd_output_bps = 32;
+            dsd_output_endian = DSD_OUTPUT_ENDIAN_BIG;
+            fprintf(stderr, "Error:FFMPEG:Unknown DSD output format selected!\n");
     }
-
-    fprintf(stderr, "selection=%d, dsd_output_bps=%d\n", deadbeef->conf_get_int ("alsa.dsdformat", 0), dsd_output_bps);
 
     deadbeef->conf_unlock ();
 }
