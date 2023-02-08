@@ -59,6 +59,15 @@ static snd_pcm_uframes_t req_period_size;
 static int conf_alsa_resample = 1;
 static char conf_alsa_soundcard[100] = "default";
 
+static snd_pcm_format_t dsd_format;
+static snd_pcm_format_t supported_dsd_format[] = {
+    SND_PCM_FORMAT_DSD_U32_BE,
+    SND_PCM_FORMAT_DSD_U32_LE,
+    SND_PCM_FORMAT_DSD_U16_BE,
+    SND_PCM_FORMAT_DSD_U16_BE,
+    SND_PCM_FORMAT_DSD_U8,
+};
+
 static int
 palsa_callback (char *stream, int len);
 
@@ -109,15 +118,20 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     snd_pcm_hw_params_t *hw_params = NULL;
     int err = 0;
 
+    fprintf(stderr, "DBG:ALSA:input bps=%d, is_float=%d, is_dsd=%d\n", fmt->bps, fmt->is_float, fmt->is_dsd);
+
     memcpy (&plugin.fmt, fmt, sizeof (ddb_waveformat_t));
     if (!plugin.fmt.channels) {
         // generic format
         plugin.fmt.bps = 16;
         plugin.fmt.is_float = 0;
+        plugin.fmt.is_dsd = 0;
         plugin.fmt.channels = 2;
         plugin.fmt.samplerate = 44100;
         plugin.fmt.channelmask = 3;
     }
+
+    fprintf(stderr, "DBG:ALSA:bps=%d, samplerate=%d, is_float=%d, is_dsd=%d\n", plugin.fmt.bps, plugin.fmt.samplerate, plugin.fmt.is_float, plugin.fmt.is_dsd);
 
     snd_pcm_nonblock(audio, 0);
     snd_pcm_drain (audio);
@@ -142,68 +156,69 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     }
 
     snd_pcm_format_t sample_fmt;
-    switch (plugin.fmt.bps) {
-    case 8:
-        sample_fmt = SND_PCM_FORMAT_S8;
-        break;
-    case 16:
-#if WORDS_BIGENDIAN
-        sample_fmt = SND_PCM_FORMAT_S16_BE;
-#else
-        sample_fmt = SND_PCM_FORMAT_S16_LE;
-#endif
-        break;
-    case 24:
-#if WORDS_BIGENDIAN
-        sample_fmt = SND_PCM_FORMAT_S24_3BE;
-#else
-        sample_fmt = SND_PCM_FORMAT_S24_3LE;
-#endif
-        break;
-    case 32:
-        if (plugin.fmt.is_float) {
-#if WORDS_BIGENDIAN
-            sample_fmt = SND_PCM_FORMAT_FLOAT_BE;
-#else
-            sample_fmt = SND_PCM_FORMAT_FLOAT_LE;
-#endif
+    if (plugin.fmt.is_dsd == 1) {
+        fprintf(stderr, "DBG:ALSA:DSD stream received!\n");
+        int selected_dsd_index = deadbeef->conf_get_int ("alsa.dsdformat", 0);
+        if (selected_dsd_index < 0 || selected_dsd_index > sizeof(supported_dsd_format)) {
+            fprintf (stderr, "Invalid DSD Selection\n");
+            err = -1;
+            goto error;
         }
-        else {
-#if WORDS_BIGENDIAN
-            sample_fmt = SND_PCM_FORMAT_S32_BE;
-#else
-            sample_fmt = SND_PCM_FORMAT_S32_LE;
-#endif
+        dsd_format = supported_dsd_format[selected_dsd_index];
+        if (snd_pcm_hw_params_set_format (audio, hw_params, dsd_format) < 0) {
+            fprintf (stderr, "Your DAC does not support selected dsd format\n");
+            goto error;
         }
-        break;
-    }
-
-    if ((err = snd_pcm_hw_params_set_format (audio, hw_params, sample_fmt)) < 0) {
-        fprintf (stderr, "cannot set sample format to %d bps (error: %s), trying all supported formats\n", plugin.fmt.bps, snd_strerror (err));
-
-        int fmt_cnt[] = { 16, 24, 32, 32, 8 };
+        sample_fmt = dsd_format;
+    } else {
+            switch (plugin.fmt.bps) {
+            case 8:
+                sample_fmt = SND_PCM_FORMAT_S8;
+                break;
+            case 16:
 #if WORDS_BIGENDIAN
-        int fmt[] = { SND_PCM_FORMAT_S16_BE, SND_PCM_FORMAT_S24_3BE, SND_PCM_FORMAT_S32_BE, SND_PCM_FORMAT_FLOAT_BE, SND_PCM_FORMAT_S8, -1 };
+                sample_fmt = SND_PCM_FORMAT_S16_BE;
 #else
-        int fmt[] = { SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_3LE, SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_FLOAT_LE, SND_PCM_FORMAT_S8, -1 };
+                sample_fmt = SND_PCM_FORMAT_S16_LE;
 #endif
-
-        // 1st try formats with higher bps
-        int i = 0;
-        for (i = 0; fmt[i] != -1; i++) {
-            if (fmt[i] != sample_fmt && fmt_cnt[i] > plugin.fmt.bps) {
-                if (snd_pcm_hw_params_set_format (audio, hw_params, fmt[i]) >= 0) {
-                    fprintf (stderr, "Found compatible format %d bps\n", fmt_cnt[i]);
-                    sample_fmt = fmt[i];
-                    break;
+                break;
+            case 24:
+#if WORDS_BIGENDIAN
+                sample_fmt = SND_PCM_FORMAT_S24_3BE;
+#else
+                sample_fmt = SND_PCM_FORMAT_S24_3LE;
+#endif
+                break;
+            case 32:
+                if (plugin.fmt.is_float) {
+#if WORDS_BIGENDIAN
+                    sample_fmt = SND_PCM_FORMAT_FLOAT_BE;
+#else
+                    sample_fmt = SND_PCM_FORMAT_FLOAT_LE;
+#endif
+                } else {
+#if WORDS_BIGENDIAN
+                    sample_fmt = SND_PCM_FORMAT_S32_BE;
+#else
+                    sample_fmt = SND_PCM_FORMAT_S32_LE;
+#endif
                 }
+                break;
             }
-        }
-        if (fmt[i] == -1) {
-            // next try formats with lower bps
-            i = 0;
+        if ((err = snd_pcm_hw_params_set_format (audio, hw_params, sample_fmt)) < 0) {
+            fprintf (stderr, "cannot set sample format to %d bps (error: %s), trying all supported formats\n", plugin.fmt.bps, snd_strerror (err));
+
+            int fmt_cnt[] = { 16, 24, 32, 32, 8 };
+#if WORDS_BIGENDIAN
+            int fmt[] = { SND_PCM_FORMAT_S16_BE, SND_PCM_FORMAT_S24_3BE, SND_PCM_FORMAT_S32_BE, SND_PCM_FORMAT_FLOAT_BE, SND_PCM_FORMAT_S8, -1 };
+#else
+            int fmt[] = { SND_PCM_FORMAT_S16_LE, SND_PCM_FORMAT_S24_3LE, SND_PCM_FORMAT_S32_LE, SND_PCM_FORMAT_FLOAT_LE, SND_PCM_FORMAT_S8, -1 };
+
+#endif
+            int i = 0;
+            // 1st try formats with higher bps     
             for (i = 0; fmt[i] != -1; i++) {
-                if (fmt[i] != sample_fmt && fmt_cnt[i] < plugin.fmt.bps) {
+                if (fmt[i] != sample_fmt && fmt_cnt[i] > plugin.fmt.bps) {
                     if (snd_pcm_hw_params_set_format (audio, hw_params, fmt[i]) >= 0) {
                         fprintf (stderr, "Found compatible format %d bps\n", fmt_cnt[i]);
                         sample_fmt = fmt[i];
@@ -211,11 +226,24 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
                     }
                 }
             }
-        }
+            if (fmt[i] == -1) {
+                // next try formats with lower bps
+                i = 0;
+                for (i = 0; fmt[i] != -1; i++) {
+                    if (fmt[i] != sample_fmt && fmt_cnt[i] < plugin.fmt.bps) {
+                        if (snd_pcm_hw_params_set_format (audio, hw_params, fmt[i]) >= 0) {
+                            fprintf (stderr, "Found compatible format %d bps\n", fmt_cnt[i]);
+                            sample_fmt = fmt[i];
+                            break;
+                        }
+                    }
+                }
+            }
 
-        if (fmt[i] == -1) {
-            fprintf (stderr, "Fallback format could not be found\n");
-            goto error;
+            if (fmt[i] == -1) {
+                fprintf (stderr, "Fallback format could not be found\n");
+                goto error;
+            }
         }
     }
 
@@ -278,13 +306,23 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     }
 
     plugin.fmt.is_float = 0;
+    plugin.fmt.is_dsd = 0;
     switch (sample_fmt) {
     case SND_PCM_FORMAT_S8:
         plugin.fmt.bps = 8;
         break;
+    case SND_PCM_FORMAT_DSD_U8:
+        plugin.fmt.bps = 8;
+        plugin.fmt.is_dsd = 1;
+        break;
     case SND_PCM_FORMAT_S16_BE:
     case SND_PCM_FORMAT_S16_LE:
         plugin.fmt.bps = 16;
+        break;
+    case SND_PCM_FORMAT_DSD_U16_BE:
+    case SND_PCM_FORMAT_DSD_U16_LE:
+        plugin.fmt.bps = 16;
+        plugin.fmt.is_dsd = 1;
         break;
     case SND_PCM_FORMAT_S24_3BE:
     case SND_PCM_FORMAT_S24_3LE:
@@ -294,9 +332,16 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
     case SND_PCM_FORMAT_S32_LE:
         plugin.fmt.bps = 32;
         break;
+    case SND_PCM_FORMAT_DSD_U32_BE:
+    case SND_PCM_FORMAT_DSD_U32_LE:
+        plugin.fmt.bps = 32;
+        plugin.fmt.is_dsd = 1;
+        plugin.fmt.is_float = 0;
+        break;
     case SND_PCM_FORMAT_FLOAT_LE:
     case SND_PCM_FORMAT_FLOAT_BE:
         plugin.fmt.bps = 32;
+        plugin.fmt.is_dsd = 0;
         plugin.fmt.is_float = 1;
         break;
     default:
@@ -361,6 +406,8 @@ palsa_open (void) {
     if (requested_fmt.samplerate != 0) {
         memcpy (&plugin.fmt, &requested_fmt, sizeof (ddb_waveformat_t));
     }
+
+    fprintf(stderr, "DBG:ALSA:request bps=%d, is_float=%d, is_dsd=%d\n", requested_fmt.bps, requested_fmt.is_float, requested_fmt.is_dsd);
 
     if (palsa_set_hw_params (&plugin.fmt) < 0) {
         goto open_error;
@@ -499,6 +546,7 @@ palsa_setformat (ddb_waveformat_t *fmt) {
     LOCK;
     _setformat_requested = 1;
     memcpy (&requested_fmt, fmt, sizeof (ddb_waveformat_t));
+    fprintf(stderr, "DBG:ALSA:set bps=%d, is_float=%d, is_dsd=%d\n", fmt->bps, fmt->is_float, fmt->is_dsd);
     UNLOCK;
     return 0;
 }
@@ -777,6 +825,8 @@ alsa_configchanged (void) {
         trace ("alsa: config option changed, restarting\n");
         deadbeef->sendmessage (DB_EV_REINIT_SOUND, 0, 0, 0);
     }
+    int selected_dsd_index = deadbeef->conf_get_int("alsa.dsdformat", 0);
+    dsd_format = supported_dsd_format[selected_dsd_index];
     deadbeef->conf_unlock ();
     return 0;
 }
@@ -850,6 +900,7 @@ static const char settings_dlg[] =
     "property \"Use ALSA resampling\" checkbox alsa.resample 1;\n"
     "property \"Preferred buffer size\" entry alsa.buffer " DEFAULT_BUFFER_SIZE_STR ";\n"
     "property \"Preferred period size\" entry alsa.period " DEFAULT_PERIOD_SIZE_STR ";\n"
+    "property \"DSD output format:\" select[5] alsa.dsdformat 0 \"U32_BE\" \"U32_LE\" \"U16_BE\" \"U16_LE\" \"U8\";\n"
 ;
 
 // define plugin interface

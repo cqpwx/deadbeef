@@ -59,6 +59,16 @@ static DB_functions_t *deadbeef;
 
 static char * exts[EXT_MAX+1] = {NULL};
 
+static int enable_dsd = 0;
+
+static const uint8_t bit_reverse_table[256] =
+{
+#define R2(n)     n,     n + 2*64,     n + 1*64,     n + 3*64
+#define R4(n) R2(n), R2(n + 2*16), R2(n + 1*16), R2(n + 3*16)
+#define R6(n) R4(n), R4(n + 2*4 ), R4(n + 1*4 ), R4(n + 3*4 )
+    R6(0), R6(2), R6(1), R6(3)
+};
+
 typedef struct {
     DB_fileinfo_t info;
     AVCodec *codec;
@@ -80,6 +90,81 @@ typedef struct {
     int64_t endsample;
     int64_t currentsample;
 } ffmpeg_info_t;
+
+int is_codec_dsd(enum AVCodecID codec_id) {
+    switch(codec_id) {
+    case AV_CODEC_ID_DSD_LSBF:
+    case AV_CODEC_ID_DSD_MSBF:
+    case AV_CODEC_ID_DSD_LSBF_PLANAR:
+    case AV_CODEC_ID_DSD_MSBF_PLANAR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static uint8_t
+bit_reverse(uint8_t x)
+{
+	return bit_reverse_table[x];
+}
+
+static void
+bit_reverse_buffer(uint8_t *start, int count)
+{
+    char* end = start + count;
+	for (char* p = start; p < end; ++p)
+		*p = bit_reverse(*p);
+}
+
+/**
+ * DSF data is build up of alternating 4096 blocks of DSD samples for left and
+ * right. Convert the buffer holding 1 block of 4096 DSD left samples and 1
+ * block of 4096 DSD right samples to 8k of samples in normal PCM left/right
+ * order.
+ */
+#define DSF_BLOCK_SIZE 4096
+static void
+dsf_to_pcm_order(uint8_t *dest, size_t nrbytes)
+{
+    uint8_t temp[DSF_BLOCK_SIZE * 2] = { 0 };
+
+    if (nrbytes != DSF_BLOCK_SIZE * 2) {
+        fprintf(stderr, "DBG:FFMPEG:Packet size is not %d,which equals to %d\n", DSF_BLOCK_SIZE * 2, nrbytes);
+        return;
+    }
+
+    unsigned int* left = (unsigned int*)dest;
+    unsigned int* right = (unsigned int*)(dest + DSF_BLOCK_SIZE);
+    unsigned int* to = (unsigned int*)temp;
+    for (unsigned int i = 0; i < DSF_BLOCK_SIZE * 2 / sizeof(unsigned int); i += 2) {
+        to[i] = left[i / 2];
+        to[i + 1] = right[i / 2];
+    }
+
+	memcpy(dest, temp, nrbytes);
+}
+
+#define DSD_SAMPLERATE_64 2882400
+#define DSD_SAMPLERATE_128 5644800
+#define DSD_SAMPLERATE_256 11289600
+#define DSD_SAMPLERATE_512 22279200
+#define ALSA_BASE_DSD_SAMPLERATE 88200
+static int
+dsd_translate_to_alsa_samplerate(int samplerate) {
+    switch (samplerate) {
+        case DSD_SAMPLERATE_64:
+            return ALSA_BASE_DSD_SAMPLERATE;
+        case DSD_SAMPLERATE_128:
+            return ALSA_BASE_DSD_SAMPLERATE * 2;
+        case DSD_SAMPLERATE_256:
+            return ALSA_BASE_DSD_SAMPLERATE * 3;
+        case DSD_SAMPLERATE_512:
+            return ALSA_BASE_DSD_SAMPLERATE * 4;
+        default:
+            return ALSA_BASE_DSD_SAMPLERATE;
+    }
+}
 
 static DB_fileinfo_t *
 ffmpeg_open (uint32_t hints) {
@@ -228,6 +313,18 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
     if (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP) {
         _info->fmt.is_float = 1;
     }
+    if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
+        _info->fmt.is_float = 0;
+        _info->fmt.is_dsd = 1;
+        _info->fmt.bps = 32;
+        _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
+        fprintf(stderr, "DBG:FFMPEG Plugin:Set dsd enabled\n");
+    }
+
+    fprintf(stderr, "DBG:FFMPEG Plugin:codec_id=%d, sample_fmt=%d, bit_rate=%d\n", 
+            info->codec_context->codec_id,
+            info->codec_context->sample_fmt,
+            info->codec_context->bit_rate);
 
     // FIXME: channel layout from ffmpeg
     // int64_t layout = info->ctx->channel_layout;
@@ -248,6 +345,9 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
         info->startsample = 0;
         info->endsample = totalsamples - 1;
     }
+
+    fprintf(stderr, "DBG:FFMPEG Plugin:bps=%d, fmt.is_float=%d fmt.is_dsd=%d\n", _info->fmt.bps, _info->fmt.is_float, _info->fmt.is_dsd);
+
     return 0;
 }
 
@@ -292,10 +392,19 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
     ffmpeg_info_t *info = (ffmpeg_info_t*)_info;
 
     _info->fmt.channels = info->codec_context->channels;
-    _info->fmt.samplerate = info->codec_context->sample_rate;
-    _info->fmt.bps = av_get_bytes_per_sample (info->codec_context->sample_fmt) * 8;
-    _info->fmt.is_float = (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP);
-
+    
+   
+    if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
+        _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
+        _info->fmt.bps = 32;
+        _info->fmt.is_dsd = 1;
+        _info->fmt.is_float = 0;
+    } else {
+        _info->fmt.samplerate = info->codec_context->sample_rate;
+        _info->fmt.bps = av_get_bytes_per_sample (info->codec_context->sample_fmt) * 8;
+        _info->fmt.is_dsd = 0;
+        _info->fmt.is_float = (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP);
+    }
     int samplesize = _info->fmt.channels * _info->fmt.bps / 8;
 
     if (info->endsample >= 0 && info->currentsample + size / samplesize > info->endsample) {
@@ -330,56 +439,68 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
             int out_size = info->buffer_size;
             int len = 0;
             //trace ("in: out_size=%d(%d), size=%d\n", out_size, AVCODEC_MAX_AUDIO_FRAME_SIZE, size);
-
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 28, 0)
-            int ret = avcodec_send_packet (info->codec_context, &info->pkt);
-            if (ret < 0) {
-                break;
-            }
-            ret = avcodec_receive_frame (info->codec_context,info->frame);
-            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
-                break;
-            }
-            else {
+            if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
                 len = info->pkt.size;
-            }
-#else
-            int got_frame = 0;
-            len = avcodec_decode_audio4(info->ctx, info->frame, &got_frame, &info->pkt);
-#endif
-
-            if (len > 0) {
-                if (ensure_buffer (info, info->frame->nb_samples * (_info->fmt.bps >> 3))) {
-                    return -1;
+            } else {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(55, 28, 0)
+                int ret = avcodec_send_packet (info->codec_context, &info->pkt);
+                if (ret < 0) {
+                    break;
                 }
-                if (av_sample_fmt_is_planar(info->codec_context->sample_fmt)) {
-                    out_size = 0;
-                    for (int c = 0; c < info->codec_context->channels; c++) {
-                        for (int i = 0; i < info->frame->nb_samples; i++) {
-                            if (_info->fmt.bps == 8) {
-                                info->buffer[i*info->codec_context->channels+c] = ((int8_t *)info->frame->extended_data[c])[i];
-                                out_size++;
-                            }
-                            else if (_info->fmt.bps == 16) {
-                                int16_t outsample = ((int16_t *)info->frame->extended_data[c])[i];
-                                ((int16_t*)info->buffer)[i*info->codec_context->channels+c] = outsample;
-                                out_size += 2;
-                            }
-                            else if (_info->fmt.bps == 24) {
-                                memcpy (&info->buffer[(i*info->codec_context->channels+c)*3], &((int8_t*)info->frame->extended_data[c])[i*3], 3);
-                                out_size += 3;
-                            }
-                            else if (_info->fmt.bps == 32) {
-                                int32_t sample = ((int32_t *)info->frame->extended_data[c])[i];
-                                ((int32_t*)info->buffer)[i*info->codec_context->channels+c] = sample;
-                                out_size += 4;
+                ret = avcodec_receive_frame (info->codec_context,info->frame);
+                if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+                    break;
+                }
+                else {
+                    len = info->pkt.size;
+                }
+#else
+                int got_frame = 0;
+                len = avcodec_decode_audio4(info->ctx, info->frame, &got_frame, &info->pkt);
+#endif
+            }
+            if (len > 0) {
+                if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
+                    out_size = info->pkt.size;
+                    if (ensure_buffer (info, out_size)) {
+                        return -1;
+                    }
+                    memcpy(info->buffer, info->pkt.data, out_size);
+                    bit_reverse_buffer(info->buffer, out_size);
+                    dsf_to_pcm_order(info->buffer, out_size);
+                } else {
+                    if (ensure_buffer (info, info->frame->nb_samples * (_info->fmt.bps >> 3))) {
+                        return -1;
+                    }
+                    if (av_sample_fmt_is_planar(info->codec_context->sample_fmt)) {
+                        out_size = 0;
+                        for (int c = 0; c < info->codec_context->channels; c++) {
+                            for (int i = 0; i < info->frame->nb_samples; i++) {
+                                if (_info->fmt.bps == 8) {
+                                    info->buffer[i*info->codec_context->channels+c] = ((int8_t *)info->frame->extended_data[c])[i];
+                                    out_size++;
+                                }
+                                else if (_info->fmt.bps == 16) {
+                                    int16_t outsample = ((int16_t *)info->frame->extended_data[c])[i];
+                                    ((int16_t*)info->buffer)[i*info->codec_context->channels+c] = outsample;
+                                    out_size += 2;
+                                }
+                                else if (_info->fmt.bps == 24) {
+                                    memcpy (&info->buffer[(i*info->codec_context->channels+c)*3], &((int8_t*)info->frame->extended_data[c])[i*3], 3);
+                                    out_size += 3;
+                                }
+                                else if (_info->fmt.bps == 32) {
+                                    int32_t sample = ((int32_t *)info->frame->extended_data[c])[i];
+                                    ((int32_t*)info->buffer)[i*info->codec_context->channels+c] = sample;
+                                    out_size += 4;
+                                }
                             }
                         }
                     }
-                }
-                else {
-                    out_size = info->frame->nb_samples * (_info->fmt.bps >> 3) * _info->fmt.channels;
-                    memcpy (info->buffer, info->frame->extended_data[0], out_size);
+                    else {
+                        out_size = info->frame->nb_samples * (_info->fmt.bps >> 3) * _info->fmt.channels;
+                        memcpy (info->buffer, info->frame->extended_data[0], out_size);
+                    }
                 }
             }
 
@@ -711,7 +832,11 @@ ffmpeg_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
         deadbeef->pl_add_meta (it, ":BPS", s);
         snprintf (s, sizeof (s), "%d", info.codec_context->channels);
         deadbeef->pl_add_meta (it, ":CHANNELS", s);
-        snprintf (s, sizeof (s), "%d", samplerate);
+        if (is_codec_dsd(info.codec_context->codec_id)) {
+            snprintf (s, sizeof (s), "%.4fM", (float)(samplerate * 8) / 1000000);
+        } else {
+            snprintf (s, sizeof (s), "%d", samplerate);
+        }
         deadbeef->pl_add_meta (it, ":SAMPLERATE", s);
         int br = (int)roundf(fsize / duration * 8 / 1000);
         snprintf (s, sizeof (s), "%d", br);
@@ -726,6 +851,7 @@ ffmpeg_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
         deadbeef->pl_item_unref (it);
         return cue;
     }
+    
 
     // now the track is ready, insert into playlist
     after = deadbeef->plt_insert_item (plt, after, it);
@@ -838,6 +964,9 @@ ffmpeg_init_exts (void) {
         n = add_new_exts (n, UNPOPULATED_EXTS_BY_FFMPEG, ',');
     }
     exts[n] = NULL;
+
+    enable_dsd = deadbeef->conf_get_int ("ffmpeg.enable_dsd", 0);
+
     deadbeef->conf_unlock ();
 }
 
@@ -918,6 +1047,7 @@ error:
 
 static const char settings_dlg[] =
     "property \"Use all extensions supported by ffmpeg\" checkbox ffmpeg.enable_all_exts 0;\n"
+    "property \"Direct DSD stream output\" checkbox ffmpeg.enable_dsd 0;\n"
     "property \"File Extensions (separate with ';')\" entry ffmpeg.extensions \"" DEFAULT_EXTS "\";\n"
 ;
 
