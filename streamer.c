@@ -2104,7 +2104,11 @@ streamer_apply_soft_volume (char *bytes, int sz) {
 
     char *stream = bytes;
     int bytesread = sz;
-    if (output->fmt.bps == 16) {
+    if (output->fmt.is_dsd) {
+        // TODO: Apply soft volume to dsd stream
+        // Now just ignore this here leave volume unchanged.
+        return;
+    } else if (output->fmt.bps == 16) {
         int16_t ivolume = (int16_t)(vol * 1000);
         if (ivolume != 1000) {
             int half = bytesread/2;

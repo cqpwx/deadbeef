@@ -892,7 +892,7 @@ static const char settings_dlg[] =
     "property \"Use ALSA resampling\" checkbox alsa.resample 1;\n"
     "property \"Preferred buffer size\" entry alsa.buffer " DEFAULT_BUFFER_SIZE_STR ";\n"
     "property \"Preferred period size\" entry alsa.period " DEFAULT_PERIOD_SIZE_STR ";\n"
-    "property \"DSD output format:\" select[5] alsa.dsdformat 0 \"U32_BE\" \"U32_LE\" \"U16_BE\" \"U16_LE\";\n"
+    "property \"DSD output format:\" select[4] alsa.dsdformat 0 \"U32_BE\" \"U32_LE\" \"U16_BE\" \"U16_LE\";\n"
 ;
 
 // define plugin interface

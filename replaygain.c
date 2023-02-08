@@ -38,7 +38,7 @@ static ddb_replaygain_settings_t current_settings;
 
 void
 replaygain_apply_with_settings (ddb_replaygain_settings_t *settings, ddb_waveformat_t *fmt, char *bytes, int numbytes) {
-    if (settings->processing_flags == 0) {
+    if (settings->processing_flags == 0 || fmt->is_dsd) {
         return;
     }
     if (fmt->bps == 16) {
