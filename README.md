@@ -84,3 +84,7 @@ pacman -S mingw-w64-x86_64-jansson mingw-w64-x86_64-gtk3 mingw-w64-x86_64-gtk2 m
 ## Supporting this project
 
 [Please visit the support page](http://deadbeef.sourceforge.net/support.html)
+
+## About this mod
+* Add DSD Direct output to ALSA driver.
+* Add DoP Support.
