@@ -61,7 +61,7 @@ static int ca_play (void);
 static int ca_pause (void);
 
 static UInt32
-GetNumberAvailableNominalSampleRateRanges()
+GetNumberAvailableNominalSampleRateRanges(void)
 {
     UInt32 theAnswer = 0;
     AudioObjectPropertyAddress theAddress = {
@@ -137,6 +137,7 @@ ca_apply_format (void) {
     deadbeef->mutex_lock (mutex);
     if (req_format.mSampleRate > 0) {
         req_format.mSampleRate = get_best_samplerate ((int)req_format.mSampleRate, avail_samplerates, num_avail_samplerates);
+        
 
         AudioObjectPropertyAddress theAddress = {
             kAudioDevicePropertyStreamFormat,
@@ -240,6 +241,7 @@ ca_get_deviceid (void) {
 
 }
 
+static int hogmode = 0;
 static int
 ca_init (void) {
     OSStatus err;
@@ -250,6 +252,8 @@ ca_init (void) {
         kAudioObjectPropertyScopeGlobal,
         kAudioObjectPropertyElementMaster
     };
+    
+    hogmode = deadbeef->conf_get_int ("ca.hogmode", 0);
 
     ca_free ();
 
@@ -292,6 +296,34 @@ ca_init (void) {
     if (err != noErr) {
         // non-critical
         trace ("AudioObjectSetPropertyData kAudioDevicePropertyBufferFrameSize: %x\n", err);
+    }
+    
+    if (hogmode) {
+        // Set hogmode
+        pid_t hoggingProcess = -1;
+        theAddress.mSelector = kAudioDevicePropertyHogMode;
+        theAddress.mScope = kAudioObjectPropertyScopeGlobal;
+        theAddress.mElement = kAudioObjectPropertyElementMaster;
+        err = AudioObjectSetPropertyData(device_id, &theAddress, 0, NULL, sizeof(hoggingProcess), &hoggingProcess);
+        if (err != noErr) {
+            trace ("AudioObjectSetPropertyData kAudioDevicePropertyHogMode: %x\n", err);
+        }
+        // Disable mixing
+        Boolean writeable = 0;
+        theAddress.mSelector = kAudioDevicePropertySupportsMixing;
+        theAddress.mScope = kAudioObjectPropertyScopeGlobal;
+        theAddress.mElement = kAudioObjectPropertyElementMaster;
+        err = AudioObjectIsPropertySettable(device_id, &theAddress, &writeable);
+        if (err == noErr && writeable) {
+            int mixValue = 0;
+            theAddress.mSelector = kAudioDevicePropertySupportsMixing;
+            theAddress.mScope = kAudioObjectPropertyScopeGlobal;
+            theAddress.mElement = kAudioObjectPropertyElementMaster;
+            err = AudioObjectSetPropertyData(device_id, &theAddress, 0, NULL, sizeof(mixValue), &mixValue);
+            if (err != noErr) {
+                trace ("AudioObjectSetPropertyData kAudioDevicePropertySupportsMixing: %x\n", err);
+            }
+        }
     }
 
     if (ca_apply_format ()) {
@@ -371,6 +403,10 @@ ca_free (void) {
         if (err != noErr) {
             trace ("AudioDeviceDestroyIOProcID: %x\n", err);
         }
+        
+        if (hogmode) {
+            // FIXME: Do something here when hogmode is enabled.
+        }
 
         if (avail_samplerates) {
             free (avail_samplerates);
@@ -397,15 +433,16 @@ ca_setformat (ddb_waveformat_t *fmt) {
     req_format.mSampleRate = (Float64)samplerate;
 
     // audioqueue happily accepts ultra-high samplerates, but doesn't really play them
-    if (req_format.mSampleRate > 192000) {
+    if (!fmt->is_dsd && req_format.mSampleRate > 192000) {
         req_format.mSampleRate = 192000;
     }
     req_format.mFormatID = kAudioFormatLinearPCM;
 
     if (is_float) {
         req_format.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
-    }
-    else {
+    } else if (fmt->is_dsd) {
+        req_format.mFormatFlags = kLinearPCMFormatFlagIsPacked | kAudioFormatFlagsNativeEndian;
+    } else {
         req_format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked | kAudioFormatFlagsNativeEndian;
     }
 
@@ -696,6 +733,10 @@ ca_plugin_stop (void) {
     return 0;
 }
 
+static const char settings_dlg[] = {
+    "property \"HogMode\" checkbox ca.hogmode 0;\n"
+};
+
 static DB_output_t plugin = {
     DDB_PLUGIN_SET_API_VERSION
     .plugin.version_major = 2,
@@ -729,6 +770,7 @@ static DB_output_t plugin = {
         "3. This notice may not be removed or altered from any source distribution.\n"
     ,
     .plugin.website = "http://deadbeef.sf.net",
+    .plugin.configdialog = settings_dlg,
     .init = ca_init,
     .free = ca_free,
     .setformat = ca_setformat,

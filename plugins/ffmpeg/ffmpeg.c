@@ -59,7 +59,11 @@ static DB_functions_t *deadbeef;
 
 static char * exts[EXT_MAX+1] = {NULL};
 
-static int enable_dsd = 0;
+#define DSD_OUTPUT_TYPE_PCM 0
+#define DSD_OUTPUT_TYPE_DIRECT 1
+#define DSD_OUTPUT_TYPE_DOP 2
+static int enable_dsd = DSD_OUTPUT_TYPE_PCM;
+
 static int dsd_output_bps = 0;
 #define DSD_OUTPUT_ENDIAN_LITTLE 0
 #define DSD_OUTPUT_ENDIAN_BIG 1
@@ -185,6 +189,23 @@ dsd_translate_to_alsa_samplerate(int samplerate) {
             return ALSA_BASE_DSD_SAMPLERATE * 4;
         default:
             return ALSA_BASE_DSD_SAMPLERATE;
+    }
+}
+
+#define DOP_BASE_SAMPLERATE 176400
+#define DOP_BPS 32
+static int dsd_translate_dop_samplerate(int samplerate) {
+    switch (samplerate) {
+        case DSD_SAMPLERATE_64:
+            return DOP_BASE_SAMPLERATE;
+        case DSD_SAMPLERATE_128:
+            return DOP_BASE_SAMPLERATE * 2;
+        case DSD_SAMPLERATE_256:
+            return DOP_BASE_SAMPLERATE * 3;
+        case DSD_SAMPLERATE_512:
+            return DOP_BASE_SAMPLERATE * 4;
+        default:
+            return DOP_BASE_SAMPLERATE;
     }
 }
 
@@ -335,11 +356,28 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
     if (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP) {
         _info->fmt.is_float = 1;
     }
-    if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
-        _info->fmt.is_float = 0;
-        _info->fmt.is_dsd = 1;
-        _info->fmt.bps = dsd_output_bps;
-        _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
+    if (is_codec_dsd(info->codec_context->codec_id)) {
+        switch(enable_dsd) {
+            case DSD_OUTPUT_TYPE_PCM:
+                _info->fmt.is_dsd = 0;
+                break;
+            case DSD_OUTPUT_TYPE_DIRECT:
+                _info->fmt.is_float = 0;
+                _info->fmt.is_dsd = 1;
+                _info->fmt.bps = dsd_output_bps;
+                _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8); // FIXME: Not all platform support ALSA!!!
+                break;
+            case DSD_OUTPUT_TYPE_DOP:
+                _info->fmt.is_float = 0;
+                _info->fmt.is_dsd = 1;
+                _info->fmt.samplerate = dsd_translate_dop_samplerate(samplerate);
+                _info->fmt.bps = DOP_BPS;
+                break;
+            default:
+                // Unknown system error,Overflow?
+                fprintf(stderr, "Unkonwn system error!");
+                abort();
+        }
     }
 
     // FIXME: channel layout from ffmpeg
@@ -400,6 +438,7 @@ ffmpeg_free (DB_fileinfo_t *_info) {
     }
 }
 
+
 static int
 ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
     trace ("ffmpeg_read_int16 %d\n", size);
@@ -407,18 +446,35 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
 
     _info->fmt.channels = info->codec_context->channels;
     
-   
-    if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
-        _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8);
-        _info->fmt.bps = dsd_output_bps;
-        _info->fmt.is_dsd = 1;
-        _info->fmt.is_float = 0;
-    } else {
-        _info->fmt.samplerate = info->codec_context->sample_rate;
-        _info->fmt.bps = av_get_bytes_per_sample (info->codec_context->sample_fmt) * 8;
-        _info->fmt.is_dsd = 0;
-        _info->fmt.is_float = (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP);
+    _info->fmt.samplerate = info->codec_context->sample_rate;
+    _info->fmt.bps = av_get_bytes_per_sample (info->codec_context->sample_fmt) * 8;
+    _info->fmt.is_dsd = 0;
+    _info->fmt.is_float = (info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLT || info->codec_context->sample_fmt == AV_SAMPLE_FMT_FLTP);
+    
+    if (is_codec_dsd(info->codec_context->codec_id)) {
+        switch (enable_dsd) {
+            case DSD_OUTPUT_TYPE_PCM:
+                // Nothing to do here
+                break;
+            case DSD_OUTPUT_TYPE_DIRECT:
+                _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8); // FIXME: Not all platform use ALSA!!!!!
+                _info->fmt.bps = dsd_output_bps;
+                _info->fmt.is_dsd = 1;
+                _info->fmt.is_float = 0;
+                break;
+            case DSD_OUTPUT_TYPE_DOP:
+                _info->fmt.samplerate = dsd_translate_dop_samplerate(info->codec_context->sample_rate * 8);
+                _info->fmt.bps = DOP_BPS;
+                _info->fmt.is_dsd = 1;
+                _info->fmt.is_float = 0;
+                break;
+            default:
+                // System error maybe overflow
+                fprintf(stderr, "Unkonwn error.\n");
+                abort();
+        }
     }
+    
     int samplesize = _info->fmt.channels * _info->fmt.bps / 8;
 
     if (info->endsample >= 0 && info->currentsample + size / samplesize > info->endsample) {
@@ -474,17 +530,43 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
 #endif
             }
             if (len > 0) {
-                if (enable_dsd && is_codec_dsd(info->codec_context->codec_id)) {
-                    out_size = info->pkt.size;
-                    if (ensure_buffer (info, out_size)) {
-                        return -1;
+                int dsd_type = is_codec_dsd(info->codec_context->codec_id);
+                if (enable_dsd && dsd_type != DSD_TYPE_NONE) {
+                    if (enable_dsd == DSD_OUTPUT_TYPE_DIRECT) {
+                        out_size = info->pkt.size;
+                        if (ensure_buffer (info, out_size)) {
+                            return -1;
+                        }
+                        memcpy(info->buffer, info->pkt.data, out_size);
+                        if ((is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_LSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_BIG) ||
+                            (is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_MSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_LITTLE)) {
+                            bit_reverse_buffer((uint8_t*)info->buffer, out_size);
+                        }
+                        dsf_to_pcm_order((uint8_t*)info->buffer, out_size, info->codec_context->channels);
+                    } else if (enable_dsd == DSD_OUTPUT_TYPE_DOP) {
+                        int channel_count = info->codec_context->channels;
+                        int channel_length = info->pkt.size / channel_count;
+                        int frame_count = info->pkt.size / channel_count; // Divide by channel
+                        out_size = frame_count * (DOP_BPS >> 3); // 8 bit most significant bits and 16 bit dsd data and 8 bit empty data.
+                        if (ensure_buffer(info, out_size)) {
+                            return -1;
+                        }
+                        unsigned char* out = (unsigned char*)info->buffer;
+                        unsigned char* in = (unsigned char*)info->pkt.data;
+                        uint8_t magic = 0x05;
+                        for (int i = 0; i < frame_count; i ++) {
+                            for (int c = 0; c < channel_count; c++) {
+                                unsigned char* data = in + channel_length * c + i * 2;
+                                *(out + 3) = magic;
+                                *(out + 2) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*data] : *data);
+                                *(out + 1) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*(data + 1)] : *(data + 1));
+                                *out = 0;
+                                out += (DOP_BPS >> 3);
+                            }
+                            // Change magic
+                            magic = ~magic;
+                        }
                     }
-                    memcpy(info->buffer, info->pkt.data, out_size);
-                    if ((is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_LSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_BIG) ||
-                        (is_codec_dsd(info->codec_context->codec_id) == DSD_TYPE_MSBF && dsd_output_endian == DSD_OUTPUT_ENDIAN_LITTLE)) {
-                        bit_reverse_buffer((uint8_t*)info->buffer, out_size);
-                    }
-                    dsf_to_pcm_order((uint8_t*)info->buffer, out_size, info->codec_context->channels);
                 } else {
                     if (ensure_buffer (info, info->frame->nb_samples * (_info->fmt.bps >> 3))) {
                         return -1;
@@ -803,7 +885,7 @@ ffmpeg_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
         trace ("ffmpeg: avcodec_open2 failed\n");
         goto error;
     }
-
+    
     int bps = av_get_bytes_per_sample (info.codec_context->sample_fmt) * 8;
     int samplerate = info.codec_context->sample_rate;
     float duration = info.format_context->duration / (float)AV_TIME_BASE;
@@ -845,7 +927,11 @@ ffmpeg_insert (ddb_playlist_t *plt, DB_playItem_t *after, const char *fname) {
         char s[100];
         snprintf (s, sizeof (s), "%lld", fsize);
         deadbeef->pl_add_meta (it, ":FILE_SIZE", s);
-        snprintf (s, sizeof (s), "%d", bps);
+        if (is_codec_dsd(info.codec_context->codec_id)) {
+            snprintf (s, sizeof (s), "%d", 1);
+        } else {
+            snprintf (s, sizeof (s), "%d", bps);
+        }
         deadbeef->pl_add_meta (it, ":BPS", s);
         snprintf (s, sizeof (s), "%d", info.codec_context->channels);
         deadbeef->pl_add_meta (it, ":CHANNELS", s);
@@ -1086,7 +1172,7 @@ error:
 
 static const char settings_dlg[] =
     "property \"Use all extensions supported by ffmpeg\" checkbox ffmpeg.enable_all_exts 0;\n"
-    "property \"Direct DSD stream output\" checkbox ffmpeg.enable_dsd 0;\n"
+    "property \"DSD stream output method\" select[3] ffmpeg.enable_dsd 0 PCM Direct DoP;\n"
     "property \"File Extensions (separate with ';')\" entry ffmpeg.extensions \"" DEFAULT_EXTS "\";\n"
 ;
 

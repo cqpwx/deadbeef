@@ -1168,7 +1168,7 @@ main (int argc, char *argv[]) {
 #endif
 
 #ifndef VERSION
-#define VERSION "devel"
+#define VERSION "WXMod"
 #endif
 
     trace ("starting deadbeef " VERSION "%s%s\n", staticlink ? " [static]" : "", portable ? " [portable]" : "");
