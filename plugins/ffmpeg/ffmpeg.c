@@ -369,7 +369,7 @@ ffmpeg_init (DB_fileinfo_t *_info, DB_playItem_t *it) {
                 break;
             case DSD_OUTPUT_TYPE_DOP:
                 _info->fmt.is_float = 0;
-                _info->fmt.is_dsd = 1;
+                _info->fmt.is_dsd = 2;
                 _info->fmt.samplerate = dsd_translate_dop_samplerate(samplerate);
                 _info->fmt.bps = DOP_BPS;
                 break;
@@ -465,7 +465,7 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
             case DSD_OUTPUT_TYPE_DOP:
                 _info->fmt.samplerate = dsd_translate_dop_samplerate(info->codec_context->sample_rate * 8);
                 _info->fmt.bps = DOP_BPS;
-                _info->fmt.is_dsd = 1;
+                _info->fmt.is_dsd = 2;
                 _info->fmt.is_float = 0;
                 break;
             default:
@@ -552,18 +552,17 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
                             return -1;
                         }
                         unsigned char* out = (unsigned char*)info->buffer;
-                        unsigned char* in = (unsigned char*)info->pkt.data;
                         uint8_t magic = 0x05;
-                        for (int i = 0; i < frame_count; i ++) {
+                        for (int f = 0; f < frame_count; f++) {
                             for (int c = 0; c < channel_count; c++) {
-                                unsigned char* data = in + channel_length * c + i * 2;
+                                uint8_t* p = info->pkt.data + channel_length * c + f * 2;
                                 *(out + 3) = magic;
-                                *(out + 2) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*data] : *data);
-                                *(out + 1) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*(data + 1)] : *(data + 1));
+                                *(out + 2) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*p] : *p);
+                                *(out + 1) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*(p + 1)] : *(p + 1));
                                 *out = 0;
                                 out += (DOP_BPS >> 3);
                             }
-                            // Change magic
+                            // Change magic every frame
                             magic = ~magic;
                         }
                     }

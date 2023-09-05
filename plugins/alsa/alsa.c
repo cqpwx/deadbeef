@@ -165,41 +165,41 @@ palsa_set_hw_params (ddb_waveformat_t *fmt) {
             goto error;
         }
         sample_fmt = dsd_format;
-    } else {
-            switch (plugin.fmt.bps) {
-            case 8:
-                sample_fmt = SND_PCM_FORMAT_S8;
-                break;
-            case 16:
+    } else {   
+        switch (plugin.fmt.bps) {
+        case 8:
+            sample_fmt = SND_PCM_FORMAT_S8;
+            break;
+        case 16:
 #if WORDS_BIGENDIAN
-                sample_fmt = SND_PCM_FORMAT_S16_BE;
+            sample_fmt = SND_PCM_FORMAT_S16_BE;
 #else
-                sample_fmt = SND_PCM_FORMAT_S16_LE;
+            sample_fmt = SND_PCM_FORMAT_S16_LE;
 #endif
-                break;
-            case 24:
+            break;
+        case 24:
 #if WORDS_BIGENDIAN
-                sample_fmt = SND_PCM_FORMAT_S24_3BE;
+            sample_fmt = SND_PCM_FORMAT_S24_3BE;
 #else
-                sample_fmt = SND_PCM_FORMAT_S24_3LE;
+            sample_fmt = SND_PCM_FORMAT_S24_3LE;
 #endif
-                break;
-            case 32:
-                if (plugin.fmt.is_float) {
+            break;
+        case 32:
+            if (plugin.fmt.is_float) {
 #if WORDS_BIGENDIAN
-                    sample_fmt = SND_PCM_FORMAT_FLOAT_BE;
+                sample_fmt = SND_PCM_FORMAT_FLOAT_BE;
 #else
-                    sample_fmt = SND_PCM_FORMAT_FLOAT_LE;
+                sample_fmt = SND_PCM_FORMAT_FLOAT_LE;
 #endif
-                } else {
+            } else {
 #if WORDS_BIGENDIAN
-                    sample_fmt = SND_PCM_FORMAT_S32_BE;
+                sample_fmt = SND_PCM_FORMAT_S32_BE;
 #else
-                    sample_fmt = SND_PCM_FORMAT_S32_LE;
+                sample_fmt = SND_PCM_FORMAT_S32_LE;
 #endif
-                }
-                break;
             }
+            break;
+        }
         if ((err = snd_pcm_hw_params_set_format (audio, hw_params, sample_fmt)) < 0) {
             fprintf (stderr, "cannot set sample format to %d bps (error: %s), trying all supported formats\n", plugin.fmt.bps, snd_strerror (err));
 
