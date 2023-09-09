@@ -453,9 +453,6 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
     
     if (is_codec_dsd(info->codec_context->codec_id)) {
         switch (enable_dsd) {
-            case DSD_OUTPUT_TYPE_PCM:
-                // Nothing to do here
-                break;
             case DSD_OUTPUT_TYPE_DIRECT:
                 _info->fmt.samplerate =  dsd_translate_to_alsa_samplerate(info->codec_context->sample_rate * 8); // FIXME: Not all platform use ALSA!!!!!
                 _info->fmt.bps = dsd_output_bps;
@@ -469,9 +466,7 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
                 _info->fmt.is_float = 0;
                 break;
             default:
-                // System error maybe overflow
-                fprintf(stderr, "Unkonwn error.\n");
-                abort();
+                break;
         }
     }
     
@@ -553,9 +548,10 @@ ffmpeg_read (DB_fileinfo_t *_info, char *bytes, int size) {
                         }
                         unsigned char* out = (unsigned char*)info->buffer;
                         uint8_t magic = 0x05;
+                        uint8_t* p;
                         for (int f = 0; f < frame_count; f++) {
                             for (int c = 0; c < channel_count; c++) {
-                                uint8_t* p = info->pkt.data + channel_length * c + f * 2;
+                                p = info->pkt.data + channel_length * c + f * 2;
                                 *(out + 3) = magic;
                                 *(out + 2) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*p] : *p);
                                 *(out + 1) = (dsd_type == DSD_TYPE_LSBF ? bit_reverse_table[*(p + 1)] : *(p + 1));
